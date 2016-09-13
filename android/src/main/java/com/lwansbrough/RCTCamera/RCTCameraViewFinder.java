@@ -4,24 +4,51 @@
 
 package com.lwansbrough.RCTCamera;
 
+import android.util.Log;
 import android.content.Context;
 import android.graphics.SurfaceTexture;
 import android.hardware.Camera;
 import android.view.TextureView;
+import android.os.AsyncTask; // barcode
+
+import com.facebook.react.bridge.Arguments;
+import com.facebook.react.bridge.ReactContext;
+import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.modules.core.DeviceEventManagerModule;
 
 import java.util.List;
+import java.util.EnumMap;
+import java.util.EnumSet;
 
-class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceTextureListener {
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.BinaryBitmap;
+import com.google.zxing.DecodeHintType;
+import com.google.zxing.MultiFormatReader;
+import com.google.zxing.PlanarYUVLuminanceSource;
+import com.google.zxing.ReaderException;
+import com.google.zxing.Result;
+import com.google.zxing.common.HybridBinarizer;
+
+class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceTextureListener, Camera.PreviewCallback {
     private int _cameraType;
     private SurfaceTexture _surfaceTexture;
     private boolean _isStarting;
     private boolean _isStopping;
     private Camera _camera;
 
+    // poor man's concurrency
+    public static volatile boolean lock = false;
+
+    // barcode reader
+    private final MultiFormatReader multiFormatReader = new MultiFormatReader();
+
+    private int fancyCounter = 0;
+
     public RCTCameraViewFinder(Context context, int type) {
         super(context);
         this.setSurfaceTextureListener(this);
         this._cameraType = type;
+        this.initBarcodeReader();
     }
 
     @Override
@@ -90,6 +117,7 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
     }
 
     synchronized private void startCamera() {
+        Log.i("RCTCamera", "startCamera 115");
         if (!_isStarting) {
             _isStarting = true;
             try {
@@ -112,6 +140,8 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
                 _camera.setParameters(parameters);
                 _camera.setPreviewTexture(_surfaceTexture);
                 _camera.startPreview();
+                // send previews to `onPreviewFrame`
+                _camera.setPreviewCallback(this);
             } catch (NullPointerException e) {
                 e.printStackTrace();
             } catch (Exception e) {
@@ -124,11 +154,14 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
     }
 
     synchronized private void stopCamera() {
+        Log.i("RCTCamera", "stopCamera");
         if (!_isStopping) {
             _isStopping = true;
             try {
                 if (_camera != null) {
                     _camera.stopPreview();
+                    // stop sending previews to `onPreviewFrame`
+                    _camera.setPreviewCallback(null);
                     RCTCamera.getInstance().releaseCameraInstance(_cameraType);
                     _camera = null;
                 }
@@ -138,6 +171,88 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
             } finally {
                 _isStopping = false;
             }
+        }
+    }
+
+    private void initBarcodeReader() {
+        EnumMap<DecodeHintType, Object> hints = new EnumMap<>(DecodeHintType.class);
+        EnumSet<BarcodeFormat> decodeFormats = EnumSet.noneOf(BarcodeFormat.class);
+        // decodeFormats.add(BarcodeFormat.EAN_13);
+        // hints.put(DecodeHintType.POSSIBLE_FORMATS, decodeFormats);
+        hints.put(DecodeHintType.PURE_BARCODE, true);
+        hints.put(DecodeHintType.TRY_HARDER, true);
+        multiFormatReader.setHints(hints);
+    }
+
+    private void sendEvent(ReactContext reactContext, String eventName, WritableMap params) {
+        reactContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class).emit(eventName, params);
+    }
+
+    private WritableMap buildEvent(String s) {
+        WritableMap event = Arguments.createMap();
+        event.putString("data", s);
+        return event;
+    }
+
+    /**
+     * Implements function on `Camera.PreviewCallback`.
+     */
+    public void onPreviewFrame(byte[] data, Camera camera) {
+        Log.i("RCTCamera", "onPreviewFrame1");
+
+        // let's try sending some stuff to the js context
+        // ReactContext reactContext = RCTCameraModule.getReactContextSingleton();
+        // WritableMap event = buildEvent(String.valueOf(fancyCounter++));
+        // sendEvent(reactContext, "CameraBarCodeReadAndroid", event);
+        //
+        new ReaderAsyncTask(camera, data).execute();
+    }
+
+    private class ReaderAsyncTask extends AsyncTask<Void, Void, Void> {
+        private final byte[] image;
+        private final Camera camera;
+
+        ReaderAsyncTask(Camera camera, byte[] image) {
+            this.camera = camera;
+            this.image = image;
+        }
+
+        @Override
+        protected Void doInBackground(Void... images) {
+            if (isCancelled()) {
+                return null;
+            }
+            if (RCTCameraViewFinder.lock) {
+              Log.i("RCTCamera", "but it was locked...");
+              return null;
+            }
+            RCTCameraViewFinder.lock = true;
+            Log.i("RCTCamera", "just locked it baby");
+
+            Camera.Size size = camera.getParameters().getPreviewSize();
+            try {
+                BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(buildLuminanceSource(image, size.width, size.height)));
+                Result result = multiFormatReader.decodeWithState(bitmap);
+
+                ReactContext reactContext = RCTCameraModule.getReactContextSingleton();
+                WritableMap event = Arguments.createMap();
+                event.putString("data", result.getText());
+                event.putString("format", result.getBarcodeFormat().toString());
+                reactContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class).emit("CameraBarCodeReadAndroid", event);
+
+            } catch (Throwable t) {
+                // meh
+                Log.e("RCTCamera", "Error decoding bitmap.", t);
+            } finally {
+                multiFormatReader.reset();
+                RCTCameraViewFinder.lock = false;
+            }
+            return null;
+        }
+
+        // Go ahead and assume it's YUV rather than die.
+        private PlanarYUVLuminanceSource buildLuminanceSource(byte[] image, int width, int height) {
+            return new PlanarYUVLuminanceSource(image, width, height, 0, 0, width, height, false);
         }
     }
 }
