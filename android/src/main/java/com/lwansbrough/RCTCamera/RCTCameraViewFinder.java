@@ -9,7 +9,7 @@ import android.content.Context;
 import android.graphics.SurfaceTexture;
 import android.hardware.Camera;
 import android.view.TextureView;
-import android.os.AsyncTask; // barcode
+import android.os.AsyncTask;
 
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.ReactContext;
@@ -36,10 +36,10 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
     private boolean _isStopping;
     private Camera _camera;
 
-    // poor man's concurrency
+    // Concurrency lock for barcode scanner to avoid flooding the runtime
     public static volatile boolean lock = false;
 
-    // barcode reader
+    // Reader instance for the barcode scanner
     private final MultiFormatReader multiFormatReader = new MultiFormatReader();
 
     private int fancyCounter = 0;
@@ -177,10 +177,10 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
     private void initBarcodeReader() {
         EnumMap<DecodeHintType, Object> hints = new EnumMap<>(DecodeHintType.class);
         EnumSet<BarcodeFormat> decodeFormats = EnumSet.noneOf(BarcodeFormat.class);
-        // decodeFormats.add(BarcodeFormat.EAN_13);
-        // hints.put(DecodeHintType.POSSIBLE_FORMATS, decodeFormats);
-        hints.put(DecodeHintType.PURE_BARCODE, true);
-        hints.put(DecodeHintType.TRY_HARDER, true);
+        decodeFormats.add(BarcodeFormat.EAN_13);
+        hints.put(DecodeHintType.POSSIBLE_FORMATS, decodeFormats);
+        // hints.put(DecodeHintType.PURE_BARCODE, true);
+        // hints.put(DecodeHintType.TRY_HARDER, true);
         multiFormatReader.setHints(hints);
     }
 
@@ -195,43 +195,52 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
     }
 
     /**
-     * Implements function on `Camera.PreviewCallback`.
-     */
+      * Implements function on `Camera.PreviewCallback`.
+      */
     public void onPreviewFrame(byte[] data, Camera camera) {
-        Log.i("RCTCamera", "onPreviewFrame1");
-
-        // let's try sending some stuff to the js context
-        // ReactContext reactContext = RCTCameraModule.getReactContextSingleton();
-        // WritableMap event = buildEvent(String.valueOf(fancyCounter++));
-        // sendEvent(reactContext, "CameraBarCodeReadAndroid", event);
-        //
-        new ReaderAsyncTask(camera, data).execute();
+        // poor man's flood protection
+        if (!RCTCameraViewFinder.lock) {
+          RCTCameraViewFinder.lock = true;
+          new ReaderAsyncTask(camera, data).execute();
+        }
     }
 
     private class ReaderAsyncTask extends AsyncTask<Void, Void, Void> {
-        private final byte[] image;
+        private byte[] imageData;
         private final Camera camera;
 
-        ReaderAsyncTask(Camera camera, byte[] image) {
+        ReaderAsyncTask(Camera camera, byte[] imageData) {
             this.camera = camera;
-            this.image = image;
+            this.imageData = imageData;
         }
 
         @Override
-        protected Void doInBackground(Void... images) {
+        protected Void doInBackground(Void... ignored) {
             if (isCancelled()) {
                 return null;
             }
-            if (RCTCameraViewFinder.lock) {
-              Log.i("RCTCamera", "but it was locked...");
-              return null;
-            }
-            RCTCameraViewFinder.lock = true;
-            Log.i("RCTCamera", "just locked it baby");
 
             Camera.Size size = camera.getParameters().getPreviewSize();
+
+            int width = size.width;
+            int height = size.height;
+
+            // rotate for zxing if orientation is portrait
+            if (RCTCamera.getInstance().getActualDeviceOrientation() == 0) {
+              byte[] rotated = new byte[imageData.length];
+              for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                  rotated[x * height + height - y - 1] = imageData[x + y * width];
+                }
+              }
+              width = size.height;
+              height = size.width;
+              imageData = rotated;
+            }
+
             try {
-                BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(buildLuminanceSource(image, size.width, size.height)));
+                PlanarYUVLuminanceSource source = new PlanarYUVLuminanceSource(imageData, width, height, 0, 0, width, height, false);
+                BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
                 Result result = multiFormatReader.decodeWithState(bitmap);
 
                 ReactContext reactContext = RCTCameraModule.getReactContextSingleton();
@@ -242,17 +251,11 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
 
             } catch (Throwable t) {
                 // meh
-                Log.e("RCTCamera", "Error decoding bitmap.", t);
             } finally {
                 multiFormatReader.reset();
                 RCTCameraViewFinder.lock = false;
+                return null;
             }
-            return null;
-        }
-
-        // Go ahead and assume it's YUV rather than die.
-        private PlanarYUVLuminanceSource buildLuminanceSource(byte[] image, int width, int height) {
-            return new PlanarYUVLuminanceSource(image, width, height, 0, 0, width, height, false);
         }
     }
 }
