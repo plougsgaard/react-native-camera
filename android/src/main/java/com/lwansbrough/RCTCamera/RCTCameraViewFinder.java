@@ -40,9 +40,7 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
     public static volatile boolean barcodeScannerTaskLock = false;
 
     // reader instance for the barcode scanner
-    private final MultiFormatReader multiFormatReader = new MultiFormatReader();
-
-    private int fancyCounter = 0;
+    private final MultiFormatReader _multiFormatReader = new MultiFormatReader();
 
     public RCTCameraViewFinder(Context context, int type) {
         super(context);
@@ -179,7 +177,7 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
         hints.put(DecodeHintType.POSSIBLE_FORMATS, decodeFormats);
         // hints.put(DecodeHintType.PURE_BARCODE, true);
         // hints.put(DecodeHintType.TRY_HARDER, true);
-        multiFormatReader.setHints(hints);
+        _multiFormatReader.setHints(hints);
     }
 
     private void sendEvent(ReactContext reactContext, String eventName, WritableMap params) {
@@ -239,7 +237,7 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
             try {
                 PlanarYUVLuminanceSource source = new PlanarYUVLuminanceSource(imageData, width, height, 0, 0, width, height, false);
                 BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
-                Result result = multiFormatReader.decodeWithState(bitmap);
+                Result result = _multiFormatReader.decodeWithState(bitmap);
 
                 ReactContext reactContext = RCTCameraModule.getReactContextSingleton();
                 WritableMap event = Arguments.createMap();
@@ -250,7 +248,7 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
             } catch (Throwable t) {
                 // meh
             } finally {
-                multiFormatReader.reset();
+                _multiFormatReader.reset();
                 RCTCameraViewFinder.barcodeScannerTaskLock = false;
                 return null;
             }
