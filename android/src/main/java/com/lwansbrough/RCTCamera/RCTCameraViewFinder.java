@@ -36,10 +36,10 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
     private boolean _isStopping;
     private Camera _camera;
 
-    // Concurrency lock for barcode scanner to avoid flooding the runtime
-    public static volatile boolean lock = false;
+    // concurrency lock for barcode scanner to avoid flooding the runtime
+    public static volatile boolean barcodeScannerTaskLock = false;
 
-    // Reader instance for the barcode scanner
+    // reader instance for the barcode scanner
     private final MultiFormatReader multiFormatReader = new MultiFormatReader();
 
     private int fancyCounter = 0;
@@ -117,7 +117,6 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
     }
 
     synchronized private void startCamera() {
-        Log.i("RCTCamera", "startCamera 115");
         if (!_isStarting) {
             _isStarting = true;
             try {
@@ -154,7 +153,6 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
     }
 
     synchronized private void stopCamera() {
-        Log.i("RCTCamera", "stopCamera");
         if (!_isStopping) {
             _isStopping = true;
             try {
@@ -199,8 +197,8 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
       */
     public void onPreviewFrame(byte[] data, Camera camera) {
         // poor man's flood protection
-        if (!RCTCameraViewFinder.lock) {
-          RCTCameraViewFinder.lock = true;
+        if (!RCTCameraViewFinder.barcodeScannerTaskLock) {
+          RCTCameraViewFinder.barcodeScannerTaskLock = true;
           new ReaderAsyncTask(camera, data).execute();
         }
     }
@@ -253,7 +251,7 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
                 // meh
             } finally {
                 multiFormatReader.reset();
-                RCTCameraViewFinder.lock = false;
+                RCTCameraViewFinder.barcodeScannerTaskLock = false;
                 return null;
             }
         }
